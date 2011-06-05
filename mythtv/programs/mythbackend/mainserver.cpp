@@ -2611,21 +2611,41 @@ void MainServer::HandleForgetRecording(QStringList &slist, PlaybackSock *pbs)
 void MainServer::HandleGoToSleep(PlaybackSock *pbs)
 {
     QStringList strlist;
+    QDateTime idleSince;
+    bool blockShutdown;
 
-    QString sleepCmd = gCoreContext->GetSetting("SleepCommand");
-    if (!sleepCmd.isEmpty())
+    if (Scheduler::CheckShutdownServer(0, idleSince,  blockShutdown))
     {
-        strlist << "OK";
-        SendResponse(pbs->getSocket(), strlist);
-        VERBOSE(VB_IMPORTANT, "Received GO_TO_SLEEP command from master, "
-                "running SleepCommand.");
-        myth_system(sleepCmd);
+        VERBOSE(VB_IDLE, "Received a request to shut down this machine.... response is OK."); 
+        // sleep 
+        QString sleep_cmd = gCoreContext->GetSetting("SleepCommand", ""); 
+ 
+        if (!sleep_cmd.isEmpty()) 
+        { 
+            VERBOSE(VB_GENERAL, QString("Running the command to shutdown " 
+                        "this computer :-\n\t\t\t\t\t\t") + sleep_cmd); 
+ 
+            strlist << "OK"; 
+            SendResponse(pbs->getSocket(), strlist); 
+            // and now shutdown myself 
+            if (!myth_system(sleep_cmd)) 
+                return; 
+            else 
+                VERBOSE(VB_IMPORTANT, "SleepCommand failed, shutdown aborted"); 
+        } 
+        else 
+        { 
+            strlist << "ERROR: SleepCommand is empty"; 
+            VERBOSE(VB_IMPORTANT, "ERROR: Slave backend should go to sleep " 
+                "but no SleepCommand found!");  
+            SendResponse(pbs->getSocket(), strlist); 
+        } 
     }
     else
     {
-        strlist << "ERROR: SleepCommand is empty";
-        VERBOSE(VB_IMPORTANT,
-                "ERROR: in HandleGoToSleep(), but no SleepCommand found!");
+        // not allowed to sleep 
+        VERBOSE(VB_IDLE, "Received a request to shut down this machine.... response is BUSY."); 
+        strlist << "BUSY"; 
         SendResponse(pbs->getSocket(), strlist);
     }
 }

@@ -345,10 +345,10 @@ int EncoderLink::SetSignalMonitoringRate(int rate, int notifyFrontend)
 
 /** \brief Tell a slave to go to sleep
  */
-bool EncoderLink::GoToSleep(void)
+int EncoderLink::GoToSleep(void)
 {
     if (IsLocal() || !sock)
-        return false;
+        return -1;
 
     lastSleepTime = QDateTime::currentDateTime();
 

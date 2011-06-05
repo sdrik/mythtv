@@ -64,7 +64,7 @@ class EncoderLink
     TVRec *GetTVRec(void) { return tv; }
 
     /// \brief Tell a slave backend to go to sleep
-    bool GoToSleep(void);
+    int GoToSleep(void);
     int LockTuner(void);
     /// \brief Unlock the tuner.
     /// \sa LockTuner(), IsTunerLocked()

@@ -144,11 +144,17 @@ bool PlaybackSock::SendReceiveStringList(
 
 /** \brief Tells a slave to go to sleep
  */
-bool PlaybackSock::GoToSleep(void)
+int PlaybackSock::GoToSleep(void)
 {
     QStringList strlist( QString("GO_TO_SLEEP") );
 
-    return SendReceiveStringList(strlist, 1) && (strlist[0] == "OK");
+    if (SendReceiveStringList(strlist, 1)) { 
+        if (strlist[0] == "OK")  
+            return 1; 
+        else if (strlist[0] == "BUSY") 
+            return 0; 
+    } 
+    return -1; 
 }
 
 /**

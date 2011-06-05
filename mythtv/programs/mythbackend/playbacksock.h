@@ -58,7 +58,7 @@ class PlaybackSock
     void setIP(QString &lip) { ip = lip; }
     QString getIP(void) const { return ip; }
 
-    bool GoToSleep(void);
+    int GoToSleep(void);
     void GetDiskSpace(QStringList &o_strlist);
     int DeleteFile(const QString &filename, const QString &sgroup);
     int StopRecording(const ProgramInfo *pginfo);

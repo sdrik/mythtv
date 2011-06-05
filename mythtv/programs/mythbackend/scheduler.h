@@ -82,6 +82,8 @@ class Scheduler : public QObject
 
     RecStatusType GetRecStatus(const ProgramInfo &pginfo);
 
+    static bool CheckShutdownServer(int prerollseconds, QDateTime &idleSince,
+                             bool &blockShutdown);
     int GetError(void) const { return error; }
 
   protected:
@@ -131,12 +133,13 @@ class Scheduler : public QObject
     bool ChangeRecordingEnd(RecordingInfo *oldp, RecordingInfo *newp);
 
     void findAllScheduledPrograms(RecList &proglist);
-    bool CheckShutdownServer(int prerollseconds, QDateTime &idleSince,
-                             bool &blockShutdown);
     void ShutdownServer(int prerollseconds, QDateTime &idleSince);
     void PutInactiveSlavesToSleep(void);
     bool WakeUpSlave(QString slaveHostname, bool setWakingStatus = true);
-    void WakeUpSlaves(void);
+    bool WakeUpSlaves(bool forceWakeAll = true);
+    bool CheckDailyWakeUpPeriodSlave(QString slaveHostname);
+    bool CheckDailyWakeUpPeriodSlaveAndEncoderStatus(QString slaveHostname, EncoderLink *enc);
+    QDateTime getDailyWakeupTime(QString sPeriod, QString slaveHostname);
 
     int FillRecordingDir(const QString &title,
                          const QString &hostname,

@@ -1865,9 +1865,6 @@ void Scheduler::RunScheduler(void)
                     }
                 }
 
-                PutInactiveSlavesToSleep();
-                lastSleepCheck = QDateTime::currentDateTime();
-
                 SendMythSystemEvent("SCHEDULER_RAN");
             }
         }
@@ -1878,13 +1875,6 @@ void Scheduler::RunScheduler(void)
                 break;
 
         curtime = QDateTime::currentDateTime();
-
-        // About every 5 minutes check for slaves that can be put to sleep
-        if (lastSleepCheck.secsTo(curtime) > 300)
-        {
-            PutInactiveSlavesToSleep();
-            lastSleepCheck = QDateTime::currentDateTime();
-        }
 
         // Go through the list of recordings starting in the next few minutes
         // and wakeup any slaves that are asleep
@@ -2187,6 +2177,15 @@ void Scheduler::RunScheduler(void)
             idleSince = QDateTime();
         }
 
+        // About every minute check for slaves that can be waken up or put to sleep 
+        if (lastSleepCheck.secsTo(curtime) >= 60) 
+        { 
+            bool slaveWaken = WakeUpSlaves(false); 
+            if (!slaveWaken) 
+                PutInactiveSlavesToSleep(); 
+            lastSleepCheck = QDateTime::currentDateTime(); 
+        } 
+ 
         // if idletimeout is 0, the user disabled the auto-shutdown feature
         if ((idleTimeoutSecs > 0) && (m_mainServer != NULL))
         {
@@ -2369,8 +2368,9 @@ void Scheduler::ShutdownServer(int prerollseconds, QDateTime &idleSince)
         if ((*recIter)->GetRecordingStatus() == rsWillRecord)
             break;
 
-    // set the wakeuptime if needed
-    if (recIter != reclist.end())
+    // set the wakeuptime if needed and if we are the master 
+    // otherwise, the master will wake up us 
+    if (recIter != reclist.end() && gCoreContext->IsMasterBackend()) 
     {
         RecordingInfo *nextRecording = (*recIter);
         QDateTime restarttime = nextRecording->GetRecordingStartTime()
@@ -2419,9 +2419,12 @@ void Scheduler::ShutdownServer(int prerollseconds, QDateTime &idleSince)
         }
     }
 
-    // tell anyone who is listening the master server is going down now
-    MythEvent me(QString("SHUTDOWN_NOW"));
-    gCoreContext->dispatch(me);
+    if (gCoreContext->IsMasterBackend())
+    {
+        // tell anyone who is listening the master server is going down now
+        MythEvent me(QString("SHUTDOWN_NOW"));
+        gCoreContext->dispatch(me);
+    }
 
     QString halt_cmd = gCoreContext->GetSetting("ServerHaltCommand",
                                             "sudo /sbin/halt -p");
@@ -2472,7 +2475,7 @@ void Scheduler::PutInactiveSlavesToSleep(void)
             "Scheduler, Checking for slaves that can be shut down");
 
     int sleepThreshold =
-        gCoreContext->GetNumSetting( "SleepThreshold", 60 * 45);
+        gCoreContext->GetNumSetting( "idleWaitForRecordingTime", 15) * 60;
 
     VERBOSE(VB_SCHEDULE+VB_EXTRA, QString("  Getting list of slaves that "
             "will be active in the next %1 minutes.")
@@ -2481,7 +2484,7 @@ void Scheduler::PutInactiveSlavesToSleep(void)
     VERBOSE(VB_SCHEDULE+VB_EXTRA, "Checking scheduler's reclist");
     RecIter recIter = reclist.begin();
     QDateTime curtime = QDateTime::currentDateTime();
-    QStringList SlavesInUse;
+    QStringList slavesInUse;
     for ( ; recIter != reclist.end(); ++recIter)
     {
         RecordingInfo *pginfo = *recIter;
@@ -2500,22 +2503,18 @@ void Scheduler::PutInactiveSlavesToSleep(void)
         {
             enc = (*m_tvList)[pginfo->GetCardID()];
             if ((!enc->IsLocal()) &&
-                (!SlavesInUse.contains(enc->GetHostName())))
+                (!slavesInUse.contains(enc->GetHostName())) &&
+                (pginfo->GetRecordingStatus() == rsWillRecord))
             {
-                if (pginfo->GetRecordingStatus() == rsWillRecord)
-                    VERBOSE(VB_SCHEDULE+VB_EXTRA, QString("    Slave %1 will "
-                            "be in use in %2 minutes").arg(enc->GetHostName())
-                            .arg(secsleft / 60));
-                else
-                    VERBOSE(VB_SCHEDULE+VB_EXTRA, QString("    Slave %1 is "
-                            "in use currently recording '%1'")
-                            .arg(enc->GetHostName()).arg(pginfo->GetTitle()));
-                SlavesInUse << enc->GetHostName();
+                VERBOSE(VB_SCHEDULE+VB_EXTRA, QString("    Slave %1 will "
+                        "be in use in %2 minutes").arg(enc->GetHostName())
+                        .arg(secsleft / 60));
+                slavesInUse << enc->GetHostName();
             }
         }
     }
 
-    VERBOSE(VB_SCHEDULE+VB_EXTRA, "  Checking inuseprograms table:");
+    VERBOSE(VB_SCHEDULE+VB_EXTRA, "2  Checking inuseprograms table:");
     QDateTime oneHourAgo = QDateTime::currentDateTime().addSecs(-61 * 60);
     MSqlQuery query(MSqlQuery::InitCon());
     query.prepare("SELECT DISTINCT hostname, recusage FROM inuseprograms "
@@ -2524,7 +2523,7 @@ void Scheduler::PutInactiveSlavesToSleep(void)
     if (query.exec())
     {
         while(query.next()) {
-            SlavesInUse << query.value(0).toString();
+            slavesInUse << query.value(0).toString();
             VERBOSE(VB_SCHEDULE+VB_EXTRA, QString("    Slave %1 is marked as "
                     "in use by a %2")
                     .arg(query.value(0).toString())
@@ -2532,40 +2531,43 @@ void Scheduler::PutInactiveSlavesToSleep(void)
         }
     }
 
-    VERBOSE(VB_SCHEDULE+VB_EXTRA, QString("  Shutting down slaves which will "
-            "be inactive for the next %1 minutes and can be put to sleep.")
-            .arg(sleepThreshold / 60));
+    QStringList slavesThatCanWake;
 
     enciter = m_tvList->begin();
     for (; enciter != m_tvList->end(); ++enciter)
     {
         enc = *enciter;
+        QString slaveHost = enc->GetHostName();
 
         if ((!enc->IsLocal()) &&
             (enc->IsAwake()) &&
-            (!SlavesInUse.contains(enc->GetHostName())) &&
-            (!enc->IsFallingAsleep()))
+            (!slavesInUse.contains(slaveHost)) &&
+            (!enc->IsFallingAsleep()) &&
+            (enc->GetSleepStatusTime().secsTo(curtime) > 300) &&
+            (!Scheduler::CheckDailyWakeUpPeriodSlave(slaveHost)))
         {
             QString sleepCommand = gCoreContext->GetSettingOnHost("SleepCommand",
-                enc->GetHostName());
+                slaveHost);
             QString wakeUpCommand = gCoreContext->GetSettingOnHost("WakeUpCommand",
-                enc->GetHostName());
+                slaveHost);
 
-            if (!sleepCommand.isEmpty() && !wakeUpCommand.isEmpty())
+            if (!sleepCommand.isEmpty() && !wakeUpCommand.isEmpty() &&
+               (!slavesThatCanWake.contains(slaveHost)))
             {
-                QString thisHost = enc->GetHostName();
+                slavesThatCanWake << slaveHost;
 
-                VERBOSE(VB_SCHEDULE+VB_EXTRA, QString("    Commanding %1 to "
-                        "go to sleep.").arg(thisHost));
+                VERBOSE(VB_SCHEDULE+VB_EXTRA, QString("    Asking %1 to "
+                        "go to sleep.").arg(slaveHost));
 
-                if (enc->GoToSleep())
+                int goToSleep = enc->GoToSleep();
+                if (goToSleep == 1)
                 {
                     QMap<int, EncoderLink *>::Iterator slviter =
                         m_tvList->begin();
                     for (; slviter != m_tvList->end(); ++slviter)
                     {
                         EncoderLink *slv = *slviter;
-                        if (slv->GetHostName() == thisHost)
+                        if (slv->GetHostName() == slaveHost)
                         {
                             VERBOSE(VB_SCHEDULE+VB_EXTRA,
                                     QString("    Marking card %1 on slave %2 "
@@ -2576,17 +2578,17 @@ void Scheduler::PutInactiveSlavesToSleep(void)
                         }
                     }
                 }
-                else
+                else if (goToSleep == -1)
                 {
                     VERBOSE(VB_IMPORTANT, LOC_ERR + QString("Unable to "
                             "shutdown %1 slave backend, setting sleep "
-                            "status to undefined.").arg(thisHost));
+                            "status to undefined.").arg(slaveHost));
                     QMap<int, EncoderLink *>::Iterator slviter =
                         m_tvList->begin();
                     for (; slviter != m_tvList->end(); ++slviter)
                     {
                         EncoderLink *slv = *slviter;
-                        if (slv->GetHostName() == thisHost)
+                        if (slv->GetHostName() == slaveHost)
                             slv->SetSleepStatus(sStatus_Undefined);
                     }
                 }
@@ -2633,8 +2635,12 @@ bool Scheduler::WakeUpSlave(QString slaveHostname, bool setWakingStatus)
         enc->SetLastWakeTime(curtime);
     }
 
+    VERBOSE(VB_SCHEDULE, QString("Trying to Wake Up %1.").arg(slaveHostname));
+
     if (!IsMACAddress(wakeUpCommand))
     {
+        wakeUpCommand = wakeUpCommand.replace(QRegExp("%SLAVE%"), QString("%1")
+                .arg(slaveHostname));
         VERBOSE(VB_SCHEDULE, QString("Executing '%1' to wake up slave.")
                 .arg(wakeUpCommand));
         myth_system(wakeUpCommand);
@@ -2645,36 +2651,124 @@ bool Scheduler::WakeUpSlave(QString slaveHostname, bool setWakingStatus)
     return true;
 }
 
-void Scheduler::WakeUpSlaves(void)
+bool Scheduler::WakeUpSlaves(bool forceWakeAll)
 {
-    QStringList SlavesThatCanWake;
+    VERBOSE(VB_SCHEDULE, "Scheduler, Checking for slaves that can be wake up");
+    QStringList slavesThatCanWake;
     QString thisSlave;
+    bool slaveWaken = false;
     QMap<int, EncoderLink *>::Iterator enciter = m_tvList->begin();
     for (; enciter != m_tvList->end(); ++enciter)
     {
         EncoderLink *enc = *enciter;
 
-        if (enc->IsLocal())
+        if ((!forceWakeAll && !enc->CanSleep()) || enc->IsAwake() || enc->IsLocal() || enc->IsWaking())
             continue;
 
         thisSlave = enc->GetHostName();
 
         if ((!gCoreContext->GetSettingOnHost("WakeUpCommand", thisSlave)
                 .isEmpty()) &&
-            (!SlavesThatCanWake.contains(thisSlave)))
-            SlavesThatCanWake << thisSlave;
-    }
+            (!slavesThatCanWake.contains(thisSlave)))
+        {
+            slavesThatCanWake << thisSlave;
 
-    int slave = 0;
-    for (; slave < SlavesThatCanWake.count(); slave++)
-    {
-        thisSlave = SlavesThatCanWake[slave];
-        VERBOSE(VB_SCHEDULE,
-                QString("Scheduler, Sending wakeup command to slave: %1")
-                        .arg(thisSlave));
-        WakeUpSlave(thisSlave, false);
+            if (forceWakeAll || (!forceWakeAll && Scheduler::CheckDailyWakeUpPeriodSlaveAndEncoderStatus(thisSlave, enc)))
+            {
+                VERBOSE(VB_SCHEDULE,
+                    QString("Scheduler, Sending wakeup command to slave: %1")
+                    .arg(thisSlave));
+                WakeUpSlave(thisSlave);
+                slaveWaken = true;
+            }
+        }
     }
+    return slaveWaken;
 }
+
+QDateTime Scheduler::getDailyWakeupTime(QString sPeriod, QString slaveHostname)
+{
+    QString sTime = gCoreContext->GetSettingOnHost(sPeriod, slaveHostname, "00:00");
+    QTime tTime = QTime::fromString(sTime, "hh:mm");
+    QDateTime dtDateTime = QDateTime(QDate::currentDate(), tTime);
+
+    return dtDateTime;
+}
+
+bool Scheduler::CheckDailyWakeUpPeriodSlaveAndEncoderStatus(QString slaveHostname, EncoderLink *enc)
+{
+    QDateTime dtCurrent = QDateTime::currentDateTime();
+    if (Scheduler::CheckDailyWakeUpPeriodSlave(slaveHostname))
+    {
+            if (enc->IsAsleep() && !enc->IsWaking())
+            {
+                VERBOSE(VB_SCHEDULE, QString("DailyWakupPeriod starts for "
+                            "slave backend %1, waking it up").arg(slaveHostname));
+                return true;
+            }
+            else if ((enc->IsWaking()) && (enc->GetSleepStatusTime()
+                        .secsTo(dtCurrent) < 370) &&
+                    (enc->GetLastWakeTime().secsTo(dtCurrent) > 60))
+            {
+                VERBOSE(VB_SCHEDULE, QString("DailyWakupPeriod already "
+                            "started for slave backend %1 but not yet "
+                            "available, trying to wake it up again.")
+                        .arg(slaveHostname));
+                return true;
+            }
+    }
+    return false;
+}
+
+bool Scheduler::CheckDailyWakeUpPeriodSlave(QString slaveHostname)
+{
+    QDateTime dtPeriod1Start = getDailyWakeupTime("DailyWakeupStartPeriod1", slaveHostname);
+    QDateTime dtPeriod1End = getDailyWakeupTime("DailyWakeupEndPeriod1", slaveHostname);
+    QDateTime dtPeriod2Start = getDailyWakeupTime("DailyWakeupStartPeriod2", slaveHostname);
+    QDateTime dtPeriod2End = getDailyWakeupTime("DailyWakeupEndPeriod2", slaveHostname);
+    QDateTime dtCurrent = QDateTime::currentDateTime();
+
+    bool inPeriod = false; 
+ 
+    // taken from mythshutdown 
+    // Check for time periods that cross midnight 
+    if (dtPeriod1End < dtPeriod1Start) 
+    { 
+        if (dtCurrent > dtPeriod1End) 
+            dtPeriod1End = dtPeriod1End.addDays(1); 
+        else 
+            dtPeriod1Start = dtPeriod1Start.addDays(-1); 
+    } 
+ 
+    if (dtPeriod2End < dtPeriod2Start) 
+    { 
+        if (dtCurrent > dtPeriod2End) 
+            dtPeriod2End = dtPeriod2End.addDays(1); 
+        else 
+            dtPeriod2Start = dtPeriod2Start.addDays(-1); 
+    } 
+ 
+    // Check for one of the daily wakeup periods 
+    if (dtPeriod1Start != dtPeriod1End) 
+    { 
+        if (dtCurrent >= dtPeriod1Start && dtCurrent <= dtPeriod1End) 
+        { 
+            VERBOSE(VB_SCHEDULE+VB_EXTRA, "In a daily wakeup period (1)."); 
+            inPeriod = true; 
+        } 
+    } 
+ 
+    if (dtPeriod2Start != dtPeriod2End) 
+    { 
+        if (dtCurrent >= dtPeriod2Start && dtCurrent <= dtPeriod2End) 
+        { 
+            VERBOSE(VB_SCHEDULE+VB_EXTRA, "In a daily wakeup period (2)."); 
+            inPeriod = true; 
+        } 
+    } 
+ 
+    return inPeriod; 
+} 
 
 void *Scheduler::SchedulerThread(void *param)
 {
