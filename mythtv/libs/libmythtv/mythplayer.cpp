@@ -4049,12 +4049,8 @@ void MythPlayer::SeekForScreenGrab(uint64_t &number, uint64_t frameNum,
         }
     }
 
-    // Only do seek if we have position map
-    if (hasFullPositionMap)
-    {
-        DiscardVideoFrame(videoOutput->GetLastDecodedFrame());
-        DoFastForward(number);
-    }
+    DiscardVideoFrame(videoOutput->GetLastDecodedFrame());
+    DoFastForward(number);
 }
 
 /** \fn MythPlayer::GetRawVideoFrame(long long)
