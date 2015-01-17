@@ -124,13 +124,6 @@ int DisplayResScreen::FindBestMatch(const DisplayResVector& dsr,
     bool rate2x = false;
     bool end = false;
 
-    // We will give priority to refresh rates that are twice what is looked for
-    if ((videorate > 24.5) && (videorate < 30.5))
-    {
-        rate2x = true;
-        videorate *= 2.0;
-    }
-
     // Amend vector with custom list
     for (uint i=0; i<dsr.size(); ++i)
     {
